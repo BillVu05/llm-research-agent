@@ -1,0 +1,15 @@
+# File: llm-research-agent/docker-compose.yml
+version: "3.8"
+
+services:
+  agent:
+    build: .
+    image: llm-research-agent:latest
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    entrypoint: ["python", "src/agent/cli.py"]
+    command: []
+    volumes:
+      - ./:/app
+
