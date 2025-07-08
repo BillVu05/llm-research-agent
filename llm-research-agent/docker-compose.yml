@@ -6,7 +6,6 @@ services:
     build: .
     image: llm-research-agent:latest
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     entrypoint: ["python", "src/agent/cli.py"]
     command: []
