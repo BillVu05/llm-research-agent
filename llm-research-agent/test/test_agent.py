@@ -1,73 +1,195 @@
+import sys
+import os
+import json
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent.cli import GenerateQueries, WebSearchTool, Reflect, Synthesize
 
-# ① Happy path: LLM returns queries, search returns docs, synthesis works
-@patch('google.generativeai.GenerativeModel.generate_content')
-def test_happy_path(mock_generate):
-    mock_generate.return_value.text = '["Q1", "Q2", "Q3"]'
-    gq = GenerateQueries()
-    queries = gq.run({'topic': 'AI'})['queries']
-    ws = WebSearchTool()
-    docs = ws.run({'queries': queries})['docs']
-    rf = Reflect()
-    reflect_out = rf.run({'queries': queries, 'docs': docs})
-    sz = Synthesize()
-    with patch('google.generativeai.GenerativeModel.generate_content') as mock_syn:
-        mock_syn.return_value.text = "Final answer [1][2]"
-        result = sz.run({'docs': docs})
-    assert isinstance(result['answer'], str)
-    assert isinstance(result['citations'], list)
+# Ensure src/ is in the Python path so `agent` can be imported
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-# ② No result: search returns empty docs, reflect asks for more
-def test_no_result():
-    queries = ["Q1"]
-    docs = []  # Simulate no results
-    rf = Reflect()
-    reflect_out = rf.run({'queries': queries, 'docs': docs})
-    assert reflect_out['need_more'] is True
-    assert len(reflect_out['new_queries']) > 0
+from agent.cli import (
+    GenerateQueries, WebSearchTool, Reflect, Synthesize,
+    Graph, Edge
+)
 
-# ③ HTTP 429: Gemini RateLimit simulation (simulate with RuntimeError)
-@patch('google.generativeai.GenerativeModel.generate_content')
-def test_http_429(mock_generate):
-    mock_generate.side_effect = RuntimeError("429: Rate limit exceeded")
-    gq = GenerateQueries()
-    with pytest.raises(RuntimeError, match="429"):
-        gq.run({'topic': 'AI'})
+@pytest.fixture
+def dummy_input():
+    return {"topic": "Who won the 2022 FIFA World Cup?"}
 
-# ④ Timeout: simulate timeout error from Gemini
-@patch('google.generativeai.GenerativeModel.generate_content')
-def test_timeout(mock_generate):
-    import socket
-    mock_generate.side_effect = socket.timeout('timeout')
-    gq = GenerateQueries()
-    with pytest.raises(socket.timeout):
-        gq.run({'topic': 'AI'})
+def test_happy_path(dummy_input):
+    def gemini_side_effect(prompt):
+        if "Break the following research question" in prompt:
+            return MagicMock(text=json.dumps([
+                "2022 FIFA World Cup winner",
+                "Argentina World Cup final"
+            ]))
+        elif "Answer this research question" in prompt:
+            return MagicMock(text=json.dumps({
+                "answer": "Argentina won the 2022 FIFA World Cup.",
+                "citations": [{"id": 1, "title": "Argentina wins", "url": "https://example.com/a"}]
+            }))
+        else:
+            return MagicMock(text="{}")
 
-# ⑤ Two-round supplement: reflect triggers a second round
-@patch('google.generativeai.GenerativeModel.generate_content')
-def test_two_round_supplement(mock_generate):
-    # First call returns queries, second and third return answer
-    mock_generate.side_effect = [
-        MagicMock(text='["Q1", "Q2", "Q3"]'),
-        MagicMock(text='Final answer [1][2][3]')
-    ]
-    gq = GenerateQueries()
-    queries = gq.run({'topic': 'AI'})['queries']
-    ws = WebSearchTool()
-    docs = ws.run({'queries': queries})['docs'][:2]  # Too few docs, will trigger second round
-    rf = Reflect()
-    reflect_out = rf.run({'queries': queries, 'docs': docs})
-    assert reflect_out['need_more'] is True
+    with patch("agent.cli.GEN_MODEL.generate_content", side_effect=gemini_side_effect), \
+         patch("agent.cli.GoogleSearch") as mock_serp:
 
-    new_queries = reflect_out['new_queries']
-    docs2 = ws.run({'queries': new_queries})['docs']
-    all_docs = docs + docs2
+        mock_search_instance = MagicMock()
+        mock_search_instance.get_dict.return_value = {
+            "organic_results": [
+                {"title": "Argentina wins", "link": "https://example.com/a"},
+                {"title": "World Cup final", "link": "https://example.com/b"},
+            ]
+        }
+        mock_serp.return_value = mock_search_instance
 
-    sz = Synthesize()
-    with patch('google.generativeai.GenerativeModel.generate_content') as mock_syn:
-        mock_syn.return_value.text = 'Final answer [1][2][3]'
-        result = sz.run({'docs': all_docs})
-    assert '[1]' in result['answer']
-    assert isinstance(result['citations'], list)
+        graph = Graph(
+            nodes={
+                "GenerateQueries": GenerateQueries(),
+                "WebSearchTool": WebSearchTool(),
+                "Reflect": Reflect(),
+                "Synthesize": Synthesize()
+            },
+            edges=[
+                Edge("GenerateQueries", "WebSearchTool"),
+                Edge("WebSearchTool", "Reflect"),
+                Edge("Reflect", "Synthesize"),
+            ],
+            entry="GenerateQueries",
+            exit="Synthesize",
+            max_iter=2
+        )
+
+        result = graph.run(dummy_input)
+
+        assert "Argentina" in result["answer"]
+        assert isinstance(result["citations"], list)
+        assert result["citations"][0]["id"] == 1
+
+def test_no_results(dummy_input):
+    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["some irrelevant query"]))), \
+         patch("agent.cli.GoogleSearch") as mock_serp:
+
+        mock_search_instance = MagicMock()
+        mock_search_instance.get_dict.return_value = {"organic_results": []}
+        mock_serp.return_value = mock_search_instance
+
+        # Also patch synthesis step
+        with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
+            "answer": "No relevant documents found to answer the question.",
+            "citations": []
+        }))):
+            graph = Graph(
+                nodes={
+                    "GenerateQueries": GenerateQueries(),
+                    "WebSearchTool": WebSearchTool(),
+                    "Reflect": Reflect(),
+                    "Synthesize": Synthesize()
+                },
+                edges=[
+                    Edge("GenerateQueries", "WebSearchTool"),
+                    Edge("WebSearchTool", "Reflect"),
+                    Edge("Reflect", "Synthesize"),
+                ],
+                entry="GenerateQueries",
+                exit="Synthesize",
+                max_iter=2
+            )
+
+            result = graph.run(dummy_input)
+            assert result["answer"].startswith("No relevant")
+            assert result["citations"] == []
+
+def test_http_429(dummy_input):
+    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["rate limited search"]))), \
+         patch("agent.cli.GoogleSearch", side_effect=Exception("429 Too Many Requests")), \
+         patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
+             "answer": "No relevant documents found to answer the question.",
+             "citations": []
+         }))):
+
+        graph = Graph(
+            nodes={
+                "GenerateQueries": GenerateQueries(),
+                "WebSearchTool": WebSearchTool(),
+                "Reflect": Reflect(),
+                "Synthesize": Synthesize()
+            },
+            edges=[
+                Edge("GenerateQueries", "WebSearchTool"),
+                Edge("WebSearchTool", "Reflect"),
+                Edge("Reflect", "Synthesize"),
+            ],
+            entry="GenerateQueries",
+            exit="Synthesize",
+            max_iter=2
+        )
+
+        result = graph.run(dummy_input)
+        assert result["citations"] == []
+
+def test_timeout(dummy_input):
+    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["timeout query"]))), \
+         patch("agent.cli.GoogleSearch", side_effect=TimeoutError("Timeout")), \
+         patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
+             "answer": "No relevant documents found to answer the question.",
+             "citations": []
+         }))):
+
+        graph = Graph(
+            nodes={
+                "GenerateQueries": GenerateQueries(),
+                "WebSearchTool": WebSearchTool(),
+                "Reflect": Reflect(),
+                "Synthesize": Synthesize()
+            },
+            edges=[
+                Edge("GenerateQueries", "WebSearchTool"),
+                Edge("WebSearchTool", "Reflect"),
+                Edge("Reflect", "Synthesize"),
+            ],
+            entry="GenerateQueries",
+            exit="Synthesize",
+            max_iter=2
+        )
+
+        result = graph.run(dummy_input)
+        assert result["answer"].startswith("No relevant")
+
+def test_two_round_supplement(dummy_input):
+    def gemini_side_effect(prompt):
+        if "Break the following research question" in prompt:
+            return MagicMock(text=json.dumps(["first query"]))
+        elif "Answer this research question" in prompt:
+            return MagicMock(text=json.dumps({
+                "answer": "No relevant documents found to answer the question.",
+                "citations": []
+            }))
+        return MagicMock(text="{}")
+
+    with patch("agent.cli.GEN_MODEL.generate_content", side_effect=gemini_side_effect), \
+         patch("agent.cli.GoogleSearch") as mock_serp:
+
+        mock_search_instance = MagicMock()
+        mock_search_instance.get_dict.return_value = {"organic_results": []}
+        mock_serp.return_value = mock_search_instance
+
+        graph = Graph(
+            nodes={
+                "GenerateQueries": GenerateQueries(),
+                "WebSearchTool": WebSearchTool(),
+                "Reflect": Reflect(),
+                "Synthesize": Synthesize()
+            },
+            edges=[
+                Edge("GenerateQueries", "WebSearchTool"),
+                Edge("WebSearchTool", "Reflect"),
+                Edge("Reflect", "Synthesize"),
+            ],
+            entry="GenerateQueries",
+            exit="Synthesize",
+            max_iter=2
+        )
+
+        result = graph.run(dummy_input)
+        assert result["answer"].startswith("No relevant")

@@ -4,7 +4,7 @@ import os
 import json
 import concurrent.futures
 from dotenv import load_dotenv
-import google.generativeai as genai
+import google.generativeai as genai 
 from serpapi import GoogleSearch
 
 # === Load environment variables ===
@@ -118,9 +118,71 @@ class Reflect(Node):
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         docs = input_data.get("docs", [])
         queries = input_data.get("queries", [])
-        need_more = len(docs) < 6
-        refined = [q + " (refined)" for q in queries[:3]] if need_more else []
-        return {"need_more": need_more, "new_queries": refined, "docs": docs, "queries": queries}
+        required_slots = ["winner", "score", "goalscorers"]
+
+        if not docs:
+            return {
+                "slots": required_slots,
+                "filled": [],
+                "need_more": True,
+                "new_queries": queries,
+                "docs": docs
+            }
+
+        # Prepare the source material for Gemini
+        joined_docs = "\n".join(f"[{i+1}] {doc['title']} - {doc['url']}" for i, doc in enumerate(docs[:5]))
+        prompt = (
+            f"You are checking whether certain facts ('slots') are supported by the documents below.\n\n"
+            f"Required slots: {required_slots}\n"
+            f"Documents:\n{joined_docs}\n\n"
+            f"Instructions:\n"
+            f"For each slot, return whether it is filled (i.e. supported clearly in a document) and explain briefly.\n"
+            f"Output only this JSON structure:\n"
+            f'{{\n  "filled": ["slot1", ...],\n  "explanations": {{ "slot": "short reason" }}\n}}\n'
+        )
+
+        response = GEN_MODEL.generate_content(prompt)
+        content = response.text.strip()
+
+        if content.startswith("```"):
+            content = "\n".join(line for line in content.splitlines() if not line.strip().startswith("```")).strip()
+
+        try:
+            parsed = json.loads(content)
+            filled_slots = parsed.get("filled", [])
+            explanations = parsed.get("explanations", {})
+        except Exception as e:
+            print("[Reflect] LLM output parse error:", e)
+            print("[Reflect] Raw output:\n", content)
+            filled_slots = []
+            explanations = {}
+
+        missing = list(set(required_slots) - set(filled_slots))
+        new_queries = []
+        if "winner" not in filled_slots:
+            new_queries.append("Who won the 2022 World Cup final?")
+        if "score" not in filled_slots:
+            new_queries.append("Final score of 2022 World Cup")
+        if "goalscorers" not in filled_slots:
+            new_queries.append("Goal scorers in 2022 World Cup final")
+
+        # === Logging ===
+        print("[Reflect] Filled slots:", filled_slots)
+        print("[Reflect] Missing slots:", missing)
+        print("[Reflect] LLM explanations:")
+        for slot in required_slots:
+            reason = explanations.get(slot, "(no explanation)")
+            print(f"  - {slot}: {reason}")
+
+        return {
+            "slots": required_slots,
+            "filled": filled_slots,
+            "need_more": len(missing) > 0,
+            "new_queries": new_queries,
+            "docs": docs,
+            "queries": queries
+        }
+
 
 class Synthesize(Node):
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:

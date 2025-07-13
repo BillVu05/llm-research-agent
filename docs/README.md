@@ -10,66 +10,86 @@ flowchart TD
     E --> F[JSON Output with Markdown Citations]
 ```
 
-- **User CLI Input:** User enters a natural-language question.
-- **Query Generation:** Agent formulates search queries.
-- **Web Search:** Executes web searches using APIs.
-- **Reflection:** Determines if additional search is needed.
-- **Synthesis:** Compiles and cites results in Markdown, outputs JSON.
+* **User CLI Input:** User enters a natural-language question.
+* **Query Generation:** Agent formulates search queries.
+* **Web Search:** Executes web searches using APIs.
+* **Reflection:** Determines if additional search is needed.
+* **Synthesis:** Compiles and cites results in Markdown, outputs JSON.
 
 ---
 
 ## How to Run
 
 1. **Clone the repository:**
-    ```bash
-    git clone https://github.com/yourusername/llm-research-agent.git
-    cd llm-research-agent
-    ```
+
+   ```bash
+   git clone https://github.com/yourusername/llm-research-agent.git
+   cd llm-research-agent
+   ```
 
 2. **Configure environment variables:**
-    - Copy `.env.example` to `.env` and fill in API keys.
+
+   1. Rename `.env.example` to `.env`:
+
+      ```bash
+      cp .env.example .env
+      ```
+
+   2. Open the `.env` file and fill in your API keys:
+
+      ```
+      SERPAPI_API_KEY=your_serpapi_key_here
+      GEMINI_API_KEY=your_google_gemini_key_here
+      ```
+
+   You can get the keys from:
+
+   * **SerpAPI**: [https://serpapi.com/manage-api-key](https://serpapi.com/manage-api-key)
+   * **Google Gemini**: [https://makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey)
 
 3. **Build and run with Docker:**
-    ```bash
-    docker build -t llm-research-agent .
-    docker run --rm -it --env-file .env llm-research-agent
-    ```
+
+   ```bash
+   docker build -t llm-research-agent .
+   docker run --rm -it --env-file .env llm-research-agent
+   ```
 
 4. **Or run locally:**
-    ```bash
-    pip install -r requirements.txt
-    python -m agent.cli
-    ```
+
+   ```bash
+   pip install -r requirements.txt
+   python -m agent.cli
+   ```
 
 ---
 
 ## Extension Ideas
 
-- **Add GUI:** Build a web or desktop interface.
-- **Support More LLMs:** Integrate additional model providers.
-- **Advanced Tooling:** Add plugins for code search, PDF parsing, or database queries.
-- **Multi-language Support:** Enable answers in languages other than English.
-- **Caching:** Implement result caching for faster repeated queries.
-- **Customizable Output:** Allow users to select output formats (YAML, HTML, etc.).
-- **API Server:** Expose agent as a REST API.
+* **Add GUI:** Build a web or desktop interface.
+* **Support More LLMs:** Integrate additional model providers.
+* **Advanced Tooling:** Add plugins for code search, PDF parsing, or database queries.
+* **Multi-language Support:** Enable answers in languages other than English.
+* **Caching:** Implement result caching for faster repeated queries.
+* **Customizable Output:** Allow users to select output formats (YAML, HTML, etc.).
+* **API Server:** Expose agent as a REST API.
 
 ---
 
 ## Design Document
 
 See [`docs/design.md`](docs/design.md) for a detailed design (≤ 10 pages). Includes:
-- System overview and diagrams
-- Component responsibilities
-- Data flow and error handling
-- Testing and deployment strategy
-- Future work and extensibility
 
+* System overview and diagrams
+* Component responsibilities
+* Data flow and error handling
+* Testing and deployment strategy
+* Future work and extensibility
 
 A fully runnable, testable, Docker-packaged Research LLM Agent that demonstrates:
 
-- **Prompt Engineering**
-- **Tool Orchestration** (LangGraph, Web Search, etc.)
-- **Engineering Delivery** (tests, Docker, docs)
+* **Prompt Engineering**
+* **Tool Orchestration** (LangGraph, Web Search, etc.)
+* **Engineering Delivery** (tests, Docker, docs)
 
 ## Business Scenario
 
@@ -87,12 +107,12 @@ Returns an English answer with Markdown citations in **pure JSON**.
 
 ## Features
 
-- CLI interface for user questions
-- Automated web search and reflection loop
-- Answer synthesis with Markdown citations
-- JSON output
-- Dockerized for easy deployment
-- Unit and integration tests
+* CLI interface for user questions
+* Automated web search and reflection loop
+* Answer synthesis with Markdown citations
+* JSON output
+* Dockerized for easy deployment
+* Unit and integration tests
 
 ---
 
@@ -174,8 +194,8 @@ pytest
 
 ## Configuration
 
-- API keys for web search and LLMs are set via environment variables.
-- See `.env.example` for details.
+* API keys for web search and LLMs are set via environment variables.
+* See `.env.example` for details.
 
 ---
 
@@ -187,6 +207,6 @@ MIT License
 
 ## Acknowledgements
 
-- [LangGraph](https://langchain-ai.github.io/langgraph/)
-- [DuckDuckGo Search API](https://duckduckgo.com/api)
-- [OpenAI](https://openai.com/)
+* [LangGraph](https://langchain-ai.github.io/langgraph/)
+* [DuckDuckGo Search API](https://duckduckgo.com/api)
+* [OpenAI](https://openai.com/)
