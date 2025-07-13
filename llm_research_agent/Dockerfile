@@ -1,12 +1,12 @@
 FROM python:3.12-slim
 
-# Set working directory
+# Set working directory inside the container
 WORKDIR /app
 
-# Copy project files
+# Copy everything into the container
 COPY . .
 
-# Install dependencies, including correct SerpAPI version
+# Install Python dependencies
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir \
         openai \
@@ -14,6 +14,5 @@ RUN pip install --upgrade pip \
         python-dotenv \
         google-search-results
 
-# Set default entrypoint
-ENTRYPOINT ["python", "src/agent/cli.py"]
-
+# Set the default entrypoint to run the CLI via __main__.py
+ENTRYPOINT ["python", "-m", "llm_research_agent"]

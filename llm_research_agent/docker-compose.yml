@@ -2,13 +2,13 @@
 version: "3.8"
 
 services:
-  agent: 
+  agent:
     build: .
     image: llm-research-agent:latest
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       SERPAPI_API_KEY: ${SERPAPI_API_KEY}
-    entrypoint: ["python", "src/agent/cli.py"]
-    command: []
+    entrypoint: ["python", "-m", "llm_research_agent"]
+    command: []  # You can override this with your question at runtime
     volumes:
       - ./:/app
