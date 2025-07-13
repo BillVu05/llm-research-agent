@@ -121,7 +121,7 @@ Returns an English answer with Markdown citations in **pure JSON**.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/llm-research-agent.git
+git clone https://github.com/BillVu05/Round-1-code.git
 cd llm-research-agent
 ```
 
@@ -208,5 +208,5 @@ MIT License
 ## Acknowledgements
 
 * [LangGraph](https://langchain-ai.github.io/langgraph/)
-* [DuckDuckGo Search API](https://duckduckgo.com/api)
+* [SerpAPI Search API](https://serpapi.com/)
 * [OpenAI](https://openai.com/)

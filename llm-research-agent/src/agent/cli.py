@@ -115,30 +115,49 @@ class WebSearchTool(Node):
         return {"docs": docs}
 
 class Reflect(Node):
+    # Topic to required slots mapping (simplified example)
+    TOPIC_SLOTS = {
+        "world cup": ["winner", "score", "goalscorers"],
+        "climate change": ["temperature rise", "causes", "impacts"],
+        "quantum computing": ["principles", "applications", "limitations"],
+    }
+    DEFAULT_SLOTS = ["fact1", "fact2"]  # fallback if no mapping
+
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         docs = input_data.get("docs", [])
         queries = input_data.get("queries", [])
-        required_slots = ["winner", "score", "goalscorers"]
+        debug = input_data.get("debug", False)
+        topic = input_data.get("topic", "").lower()
+
+        # Determine required slots by topic keyword matching
+        required_slots = self.DEFAULT_SLOTS
+        for key, slots in self.TOPIC_SLOTS.items():
+            if key in topic:
+                required_slots = slots
+                break
 
         if not docs:
+            if debug:
+                print("[Reflect] No documents provided.")
             return {
                 "slots": required_slots,
                 "filled": [],
                 "need_more": True,
                 "new_queries": queries,
-                "docs": docs
+                "docs": docs,
+                "queries": queries
             }
 
-        # Prepare the source material for Gemini
         joined_docs = "\n".join(f"[{i+1}] {doc['title']} - {doc['url']}" for i, doc in enumerate(docs[:5]))
         prompt = (
-            f"You are checking whether certain facts ('slots') are supported by the documents below.\n\n"
+            f"You are evaluating if certain facts ('slots') are clearly supported by the documents below.\n\n"
             f"Required slots: {required_slots}\n"
             f"Documents:\n{joined_docs}\n\n"
             f"Instructions:\n"
-            f"For each slot, return whether it is filled (i.e. supported clearly in a document) and explain briefly.\n"
-            f"Output only this JSON structure:\n"
-            f'{{\n  "filled": ["slot1", ...],\n  "explanations": {{ "slot": "short reason" }}\n}}\n'
+            f"For each slot, return whether it is filled with explicit, clear evidence from the documents.\n"
+            f"If no clear evidence is found, do NOT guess.\n"
+            f"Return ONLY this JSON:\n"
+            f'{{\n  "filled": ["slot1", ...],\n  "explanations": {{ "slot": "brief evidence or reason" }}\n}}\n'
         )
 
         response = GEN_MODEL.generate_content(prompt)
@@ -152,27 +171,25 @@ class Reflect(Node):
             filled_slots = parsed.get("filled", [])
             explanations = parsed.get("explanations", {})
         except Exception as e:
-            print("[Reflect] LLM output parse error:", e)
-            print("[Reflect] Raw output:\n", content)
+            if debug:
+                print("[Reflect] LLM output parse error:", e)
+                print("[Reflect] Raw output:\n", content)
             filled_slots = []
             explanations = {}
 
         missing = list(set(required_slots) - set(filled_slots))
         new_queries = []
-        if "winner" not in filled_slots:
-            new_queries.append("Who won the 2022 World Cup final?")
-        if "score" not in filled_slots:
-            new_queries.append("Final score of 2022 World Cup")
-        if "goalscorers" not in filled_slots:
-            new_queries.append("Goal scorers in 2022 World Cup final")
+        # Generate targeted new queries only for missing slots
+        for slot in missing:
+            new_queries.append(f"Information about '{slot}' related to {topic}")
 
-        # === Logging ===
-        print("[Reflect] Filled slots:", filled_slots)
-        print("[Reflect] Missing slots:", missing)
-        print("[Reflect] LLM explanations:")
-        for slot in required_slots:
-            reason = explanations.get(slot, "(no explanation)")
-            print(f"  - {slot}: {reason}")
+        if debug:
+            print("[Reflect] Filled slots:", filled_slots)
+            print("[Reflect] Missing slots:", missing)
+            print("[Reflect] LLM explanations:")
+            for slot in required_slots:
+                reason = explanations.get(slot, "(no explanation)")
+                print(f"  - {slot}: {reason}")
 
         return {
             "slots": required_slots,
@@ -182,6 +199,7 @@ class Reflect(Node):
             "docs": docs,
             "queries": queries
         }
+
 
 
 class Synthesize(Node):
@@ -249,6 +267,7 @@ def build_pipeline() -> Graph:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--topic", type=str, required=False)
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("question", nargs="?", help="Research question (positional for Docker)")
     args = parser.parse_args()
 
@@ -257,9 +276,8 @@ def main():
         parser.error("Please provide a research topic/question.")
 
     pipeline = build_pipeline()
-    result = pipeline.run({"topic": topic})
+    result = pipeline.run({"topic": topic, "debug": args.debug})
 
-    # Output just the clean answer + citations
     clean_output = {
         "answer": result.get("answer", ""),
         "citations": result.get("citations", [])
