@@ -18,22 +18,24 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent import cli  # noqa: E402
+from agent import cli
 
 WORD_BUDGET = 100
 GOLDEN = Path(__file__).with_name("golden.jsonl")
 
 
-def load_golden(path: Path) -> List[Dict[str, Any]]:
-    with path.open(encoding="utf-8") as fh:
+def load_golden(path: Path) -> list[dict[str, Any]]:
+    # utf-8-sig: Windows editors and PowerShell write a BOM, which plain utf-8
+    # decoding turns into a JSONDecodeError on the first line.
+    with path.open(encoding="utf-8-sig") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def score_case(case: Dict[str, Any], state: Dict[str, Any], elapsed: float) -> Dict[str, Any]:
+def score_case(case: dict[str, Any], state: dict[str, Any], elapsed: float) -> dict[str, Any]:
     """Deterministic scoring of one run. Pure function - unit tested offline."""
     answer = state.get("answer") or ""
     citations = state.get("citations") or []
@@ -94,7 +96,7 @@ JUDGE_PROMPT = (
 )
 
 
-def judge_groundedness(case: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+def judge_groundedness(case: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """LLM-as-judge groundedness. Opt-in: it costs a call per case."""
     docs = state.get("docs") or []
     if not docs or not state.get("answer"):
@@ -115,12 +117,12 @@ def judge_groundedness(case: Dict[str, Any], state: Dict[str, Any]) -> Dict[str,
     }
 
 
-def _mean(values: List[Any]) -> Any:
+def _mean(values: list[Any]) -> Any:
     nums = [v for v in values if isinstance(v, (int, float))]
     return round(statistics.mean(nums), 3) if nums else None
 
 
-def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(rows)
     if not n:
         return {"cases": 0}
@@ -146,7 +148,7 @@ def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def render(rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> str:
+def render(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
     out = [
         f"{'id':<22} {'tier':<11} {'kw':>5} {'slots':>6} {'cite':>5} {'rnd':>4} {'sec':>6}  ok",
         "-" * 78,

@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F: pyflakes + pycodestyle. I: import order. UP: modern syntax.
+# B: common bugs. RUF: ruff's own checks.
+select = ["E", "F", "I", "UP", "B", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["llm-research-agent/test"]
+addopts = "-q"

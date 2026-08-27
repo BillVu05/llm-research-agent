@@ -1,13 +1,13 @@
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from agent import cli  # noqa: E402
+from agent import cli
 
 TOPIC = "Who won the 2022 FIFA World Cup?"
 

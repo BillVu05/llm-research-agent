@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../eval")))
 
-import run_eval  # noqa: E402
+import run_eval
 
 CASE = {
     "id": "wc",
@@ -29,12 +29,25 @@ STATE = {
 
 def test_golden_set_is_well_formed():
     cases = run_eval.load_golden(Path(run_eval.__file__).with_name("golden.jsonl"))
-    assert len(cases) == 20
-    assert len({c["id"] for c in cases}) == 20, "duplicate case ids"
+    assert len(cases) == 25
+    assert len({c["id"] for c in cases}) == 25, "duplicate case ids"
     for c in cases:
         assert c["question"].strip()
         assert c["must_include"], f"{c['id']} has no checkable keywords"
-        assert c["tier"] in {"parametric", "retrieval"}
+        assert c["tier"] in {"parametric", "retrieval", "multi_fact"}
+    # multi_fact cases exist to exercise the reflect -> web_search loop, which
+    # the easier tiers never trigger.
+    assert sum(c["tier"] == "multi_fact" for c in cases) >= 5
+
+
+def test_load_golden_tolerates_bom(tmp_path):
+    """Windows editors and PowerShell write a UTF-8 BOM; it must not break."""
+    p = tmp_path / "bom.jsonl"
+    p.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps({"id": "x", "tier": "parametric",
+                                      "question": "q", "must_include": ["a"]}).encode()
+    )
+    assert run_eval.load_golden(p)[0]["id"] == "x"
 
 
 def test_score_case_happy():

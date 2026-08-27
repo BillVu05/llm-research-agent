@@ -16,7 +16,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Any, Dict, List, TypedDict
+from typing import Any, TypedDict
 
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
@@ -36,14 +36,14 @@ SEARCH_WORKERS = 5
 class ResearchState(TypedDict, total=False):
     topic: str
     debug: bool
-    queries: List[str]
-    slots: List[str]
-    docs: List[Dict[str, str]]
-    filled: List[str]
+    queries: list[str]
+    slots: list[str]
+    docs: list[dict[str, str]]
+    filled: list[str]
     need_more: bool
     rounds: int
     answer: str
-    citations: List[Dict[str, Any]]
+    citations: list[dict[str, Any]]
     # True when the answer is a fallback (no documents, or the model failed).
     # Lets callers and the eval harness tell a real answer from a degraded one
     # without string-matching the fallback text.
@@ -89,7 +89,7 @@ def _parse_json(raw: str, default: Any) -> Any:
         return default
 
 
-def _format_docs(docs: List[Dict[str, str]]) -> str:
+def _format_docs(docs: list[dict[str, str]]) -> str:
     """Number the documents so the model can cite them by index."""
     lines = []
     for i, doc in enumerate(docs[:MAX_CONTEXT_DOCS], 1):
@@ -104,7 +104,7 @@ def _format_docs(docs: List[Dict[str, str]]) -> str:
 # --- Nodes ----------------------------------------------------------------
 
 
-def generate_queries(state: ResearchState) -> Dict[str, Any]:
+def generate_queries(state: ResearchState) -> dict[str, Any]:
     """Plan the research: search queries plus the facts the answer must contain."""
     topic = state["topic"]
     prompt = (
@@ -131,7 +131,7 @@ def generate_queries(state: ResearchState) -> Dict[str, Any]:
     return {"queries": queries, "slots": slots, "docs": [], "rounds": 0}
 
 
-def _search_one(query: str) -> List[Dict[str, Any]]:
+def _search_one(query: str) -> list[dict[str, Any]]:
     params = {
         "engine": "google",
         "q": query,
@@ -148,7 +148,7 @@ def _search_one(query: str) -> List[Dict[str, Any]]:
         return []
 
 
-def web_search(state: ResearchState) -> Dict[str, Any]:
+def web_search(state: ResearchState) -> dict[str, Any]:
     """Run the current queries concurrently, appending newly seen URLs."""
     queries = state.get("queries", [])
     docs = list(state.get("docs", []))
@@ -179,7 +179,7 @@ def web_search(state: ResearchState) -> Dict[str, Any]:
     return {"docs": docs}
 
 
-def reflect(state: ResearchState) -> Dict[str, Any]:
+def reflect(state: ResearchState) -> dict[str, Any]:
     """Check slot coverage; on a gap, emit targeted follow-up queries."""
     docs = state.get("docs", [])
     slots = state.get("slots", [])
@@ -214,7 +214,7 @@ def reflect(state: ResearchState) -> Dict[str, Any]:
         for slot in slots:
             print(f"  - {slot}: {explanations.get(slot, '(no explanation)')}")
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "filled": filled,
         "need_more": bool(missing),
         "rounds": rounds,
@@ -232,7 +232,7 @@ def route_after_reflect(state: ResearchState) -> str:
     return "synthesize"
 
 
-def synthesize(state: ResearchState) -> Dict[str, Any]:
+def synthesize(state: ResearchState) -> dict[str, Any]:
     """Write the answer, citing only documents that were actually retrieved."""
     topic = state["topic"]
     docs = state.get("docs", [])
@@ -268,7 +268,7 @@ def synthesize(state: ResearchState) -> Dict[str, Any]:
 
     # Rebuild citations from our own retrieved docs so a cited URL can never be
     # one the model invented.
-    picked: List[int] = []
+    picked: list[int] = []
     for raw in parsed.get("citations", []) or []:
         num = raw.get("id") if isinstance(raw, dict) else raw
         if isinstance(num, bool) or not isinstance(num, int):
@@ -306,7 +306,7 @@ def build_pipeline():
     return graph.compile()
 
 
-def research(topic: str, debug: bool = False) -> Dict[str, Any]:
+def research(topic: str, debug: bool = False) -> dict[str, Any]:
     """Run the pipeline and return just the answer payload."""
     final = build_pipeline().invoke({"topic": topic, "debug": debug})
     return {"answer": final.get("answer", ""), "citations": final.get("citations", [])}

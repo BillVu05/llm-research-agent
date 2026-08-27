@@ -18,3 +18,8 @@
 {"id": "iphone-launch", "tier": "retrieval", "question": "In what year was the first iPhone released, and who announced it?", "must_include": ["2007", "jobs"]}
 {"id": "hobbit-author", "tier": "parametric", "question": "Who is the author of The Hobbit?", "must_include": ["tolkien"]}
 {"id": "webb-launch", "tier": "retrieval", "question": "On what date was the James Webb Space Telescope launched, and on which rocket?", "must_include": ["2021", "ariane"]}
+{"id": "cwc2019-final", "tier": "multi_fact", "question": "Who won the 2019 Cricket World Cup final, how was the tie resolved, and at which ground was it played?", "must_include": ["england", "boundary", "lord"]}
+{"id": "wc2026-hosts", "tier": "multi_fact", "question": "Which three countries are co-hosting the 2026 FIFA World Cup, and how many teams will compete?", "must_include": ["united states", "canada", "mexico", "48"]}
+{"id": "opera-house", "tier": "multi_fact", "question": "In what year was the Sydney Opera House opened, who was its architect, and who formally opened it?", "must_include": ["1973", "utzon", "elizabeth"]}
+{"id": "kosciuszko", "tier": "multi_fact", "question": "How tall is Mount Kosciuszko, in which Australian state is it, and what is its national park called?", "must_include": ["2228", "new south wales", "kosciuszko"]}
+{"id": "apollo11-crew", "tier": "multi_fact", "question": "Name the three Apollo 11 crew members, the date of the Moon landing, and the name of the lunar module.", "must_include": ["armstrong", "aldrin", "collins", "1969", "eagle"]}
