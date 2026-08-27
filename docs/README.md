@@ -49,9 +49,12 @@ flowchart TD
 
 3. **Build and run with Docker:**
 
+   The build context is the repo root so the image installs from the single
+   top-level `requirements.txt`.
+
    ```bash
-   docker build -t llm-research-agent .
-   docker run --rm -it --env-file .env llm-research-agent
+   cd llm-research-agent
+   docker compose run --rm agent "<your question>"
    ```
 
 4. **Or run locally:**

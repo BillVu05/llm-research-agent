@@ -1,288 +1,331 @@
-from typing import Any, Dict, List
+"""CLI research agent.
+
+Question -> query planning -> web search -> coverage reflection -> cited JSON answer.
+
+The pipeline is a LangGraph ``StateGraph``. ``reflect`` decides whether the
+retrieved documents cover every required fact ("slot"); if they do not, a
+conditional edge routes back to ``web_search`` with targeted follow-up queries,
+bounded by ``MAX_SEARCH_ROUNDS``.
+"""
+
+from __future__ import annotations
+
 import argparse
-import os
 import json
-import concurrent.futures
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from typing import Any, Dict, List, TypedDict
+
 from dotenv import load_dotenv
-import google.generativeai as genai 
+from langgraph.graph import END, START, StateGraph
 from serpapi import GoogleSearch
 
-# === Load environment variables ===
 load_dotenv()
-SERPAPI_KEY = os.getenv("SERPAPI_API_KEY")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-# === Configure Gemini ===
-genai.configure(api_key=GEMINI_KEY)
-GEN_MODEL = genai.GenerativeModel("models/gemini-1.5-flash")
+# A pinned model name is a time bomb: gemini-1.5-flash was retired and every
+# live run 404'd. The rolling alias self-heals; override to pin deliberately.
+MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-flash-latest")
+MAX_SEARCH_ROUNDS = 2
+MAX_CONTEXT_DOCS = 8
+RESULTS_PER_QUERY = 10
+SEARCH_WORKERS = 5
 
-# === Graph Support Classes ===
-class Edge:
-    def __init__(self, source: str, target: str):
-        self.source = source
-        self.target = target
 
-class Node:
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError("Subclasses should implement this!")
+class ResearchState(TypedDict, total=False):
+    topic: str
+    debug: bool
+    queries: List[str]
+    slots: List[str]
+    docs: List[Dict[str, str]]
+    filled: List[str]
+    need_more: bool
+    rounds: int
+    answer: str
+    citations: List[Dict[str, Any]]
+    # True when the answer is a fallback (no documents, or the model failed).
+    # Lets callers and the eval harness tell a real answer from a degraded one
+    # without string-matching the fallback text.
+    degraded: bool
 
-class Graph:
-    def __init__(self, nodes: Dict[str, Node], edges: List[Edge], entry: str, exit: str, max_iter: int = 2):
-        self.nodes = nodes
-        self.edges = edges
-        self.entry = entry
-        self.exit = exit
-        self.max_iter = max_iter
 
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        current_node = self.entry
-        data = input_data
-        iter_count = 0
-        while current_node != self.exit and iter_count < self.max_iter:
-            node = self.nodes[current_node]
-            output = node.run(data)
-            if output:
-                data.update(output)
-            next_nodes = [e.target for e in self.edges if e.source == current_node]
-            if not next_nodes:
-                break
-            current_node = next_nodes[0]
-            iter_count += 1
-        output = self.nodes[self.exit].run(data)
-        if output:
-            data.update(output)
-        return data
+# --- LLM access -----------------------------------------------------------
 
-# === Node Implementations ===
-class GenerateQueries(Node):
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        topic = input_data["topic"]
-        prompt = (
-            f"Break the following research question into 3-5 distinct English search queries. "
-            f"Return only a JSON array of strings. No markdown formatting or code blocks.\n\n"
-            f"Question: {topic}\nQueries:"
-        )
-        response = GEN_MODEL.generate_content(prompt)
-        content = response.text.strip()
-        if content.startswith("```"):
-            lines = content.splitlines()
-            content = "\n".join(line for line in lines if not line.strip().startswith("```")).strip()
-        try:
-            queries = json.loads(content)
-        except Exception as e:
-            print("[GenerateQueries] Failed to parse query JSON:", e)
-            print("[GenerateQueries] Response content:\n", content)
-            raise
-        return {"queries": queries}
 
-class WebSearchTool(Node):
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        queries = input_data.get("queries", [])
-        docs = []
-        seen_urls = set()
+@lru_cache(maxsize=1)
+def _model():
+    # Imported lazily so that `import agent.cli` needs neither the SDK nor an
+    # API key - keeps the test suite fast and key-free.
+    import google.generativeai as genai
 
-        def search(query):
-            params = {
-                "engine": "google",
-                "q": query,
-                "api_key": SERPAPI_KEY,
-                "num": "10",
-                "safe": "active",
-                "hl": "en",
-                "gl": "us"
-            }
-            try:
-                search = GoogleSearch(params)
-                results = search.get_dict()
-                return results.get("organic_results", [])
-            except Exception as e:
-                print(f"[WebSearchTool] Error searching query '{query}': {e}")
-                return []
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    return genai.GenerativeModel(MODEL_NAME)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            all_results = executor.map(search, queries)
 
-        total = 0
-        for result_list in all_results:
-            for item in result_list:
-                url = item.get("link")
-                title = item.get("title")
-                if url and url not in seen_urls:
-                    docs.append({"title": title, "url": url})
-                    seen_urls.add(url)
-                    total += 1
+def _generate(prompt: str) -> str:
+    """The single seam for every LLM call. Tests patch this one function.
 
-        return {"docs": docs}
+    A model failure returns "" so callers fall back to their defaults and the
+    CLI still emits valid JSON, rather than dying with a traceback.
+    """
+    try:
+        return _model().generate_content(prompt).text.strip()
+    except Exception as exc:
+        print(f"[llm] generation failed: {exc}", file=sys.stderr)
+        return ""
 
-class Reflect(Node):
-    # Topic to required slots mapping (simplified example)
-    TOPIC_SLOTS = {
-        "world cup": ["winner", "score", "goalscorers"],
-        "climate change": ["temperature rise", "causes", "impacts"],
-        "quantum computing": ["principles", "applications", "limitations"],
+
+def _parse_json(raw: str, default: Any) -> Any:
+    """Parse JSON from an LLM, tolerating ```json fences."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("```")
+        ).strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _format_docs(docs: List[Dict[str, str]]) -> str:
+    """Number the documents so the model can cite them by index."""
+    lines = []
+    for i, doc in enumerate(docs[:MAX_CONTEXT_DOCS], 1):
+        entry = f"[{i}] {doc.get('title', '')}\n    {doc.get('url', '')}"
+        snippet = (doc.get("snippet") or "").strip()
+        if snippet:
+            entry += f"\n    {snippet}"
+        lines.append(entry)
+    return "\n".join(lines)
+
+
+# --- Nodes ----------------------------------------------------------------
+
+
+def generate_queries(state: ResearchState) -> Dict[str, Any]:
+    """Plan the research: search queries plus the facts the answer must contain."""
+    topic = state["topic"]
+    prompt = (
+        "You are planning web research for a question.\n"
+        "Return ONLY a JSON object, with no markdown fences:\n"
+        '{"queries": ["...", "..."], "slots": ["...", "..."]}\n\n'
+        '"queries": 3-5 distinct English web search queries that together answer '
+        "the question.\n"
+        '"slots": 2-4 short lowercase names for the specific facts a complete '
+        "answer must contain (for a match result, say: winner, score, date).\n\n"
+        f"Question: {topic}"
+    )
+    parsed = _parse_json(_generate(prompt), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    queries = [q for q in parsed.get("queries", []) if isinstance(q, str)] or [topic]
+    slots = [s for s in parsed.get("slots", []) if isinstance(s, str)]
+
+    if state.get("debug"):
+        print(f"[generate_queries] queries={queries}")
+        print(f"[generate_queries] slots={slots}")
+
+    return {"queries": queries, "slots": slots, "docs": [], "rounds": 0}
+
+
+def _search_one(query: str) -> List[Dict[str, Any]]:
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": os.getenv("SERPAPI_API_KEY"),
+        "num": str(RESULTS_PER_QUERY),
+        "safe": "active",
+        "hl": "en",
+        "gl": "us",
     }
-    DEFAULT_SLOTS = ["fact1", "fact2"]  # fallback if no mapping
+    try:
+        return GoogleSearch(params).get_dict().get("organic_results", [])
+    except Exception as exc:  # network, quota, auth - all degrade to "no results"
+        print(f"[web_search] query {query!r} failed: {exc}")
+        return []
 
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        docs = input_data.get("docs", [])
-        queries = input_data.get("queries", [])
-        debug = input_data.get("debug", False)
-        topic = input_data.get("topic", "").lower()
 
-        # Determine required slots by topic keyword matching
-        required_slots = self.DEFAULT_SLOTS
-        for key, slots in self.TOPIC_SLOTS.items():
-            if key in topic:
-                required_slots = slots
-                break
+def web_search(state: ResearchState) -> Dict[str, Any]:
+    """Run the current queries concurrently, appending newly seen URLs."""
+    queries = state.get("queries", [])
+    docs = list(state.get("docs", []))
+    seen = {doc["url"] for doc in docs}
 
-        if not docs:
-            if debug:
-                print("[Reflect] No documents provided.")
-            return {
-                "slots": required_slots,
-                "filled": [],
-                "need_more": True,
-                "new_queries": queries,
-                "docs": docs,
-                "queries": queries
-            }
+    with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as pool:
+        batches = list(pool.map(_search_one, queries))
 
-        joined_docs = "\n".join(f"[{i+1}] {doc['title']} - {doc['url']}" for i, doc in enumerate(docs[:5]))
-        prompt = (
-            f"You are evaluating if certain facts ('slots') are clearly supported by the documents below.\n\n"
-            f"Required slots: {required_slots}\n"
-            f"Documents:\n{joined_docs}\n\n"
-            f"Instructions:\n"
-            f"For each slot, return whether it is filled with explicit, clear evidence from the documents.\n"
-            f"If no clear evidence is found, do NOT guess.\n"
-            f"Return ONLY this JSON:\n"
-            f'{{\n  "filled": ["slot1", ...],\n  "explanations": {{ "slot": "brief evidence or reason" }}\n}}\n'
-        )
+    for batch in batches:
+        for item in batch:
+            url = item.get("link")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            docs.append(
+                {
+                    "title": item.get("title", ""),
+                    "url": url,
+                    # The snippet is what makes the answer grounded in retrieved
+                    # text rather than in the model's own recall of the headline.
+                    "snippet": item.get("snippet", ""),
+                }
+            )
 
-        response = GEN_MODEL.generate_content(prompt)
-        content = response.text.strip()
+    if state.get("debug"):
+        print(f"[web_search] {len(queries)} queries -> {len(docs)} unique docs")
 
-        if content.startswith("```"):
-            content = "\n".join(line for line in content.splitlines() if not line.strip().startswith("```")).strip()
+    return {"docs": docs}
 
-        try:
-            parsed = json.loads(content)
-            filled_slots = parsed.get("filled", [])
-            explanations = parsed.get("explanations", {})
-        except Exception as e:
-            if debug:
-                print("[Reflect] LLM output parse error:", e)
-                print("[Reflect] Raw output:\n", content)
-            filled_slots = []
-            explanations = {}
 
-        missing = list(set(required_slots) - set(filled_slots))
-        new_queries = []
-        # Generate targeted new queries only for missing slots
-        for slot in missing:
-            new_queries.append(f"Information about '{slot}' related to {topic}")
+def reflect(state: ResearchState) -> Dict[str, Any]:
+    """Check slot coverage; on a gap, emit targeted follow-up queries."""
+    docs = state.get("docs", [])
+    slots = state.get("slots", [])
+    rounds = state.get("rounds", 0) + 1
 
-        if debug:
-            print("[Reflect] Filled slots:", filled_slots)
-            print("[Reflect] Missing slots:", missing)
-            print("[Reflect] LLM explanations:")
-            for slot in required_slots:
-                reason = explanations.get(slot, "(no explanation)")
-                print(f"  - {slot}: {reason}")
+    # ponytail: with no docs a second identical search cannot help, so stop and
+    # let synthesize emit the empty-result answer.
+    if not docs or not slots:
+        if state.get("debug"):
+            print(f"[reflect] round {rounds}: nothing to evaluate, stopping")
+        return {"filled": [], "need_more": False, "rounds": rounds}
 
+    prompt = (
+        "Decide which required facts are explicitly supported by the documents.\n"
+        "Do not guess: a fact counts as filled only with clear evidence.\n\n"
+        f"Required facts: {slots}\n"
+        f"Documents:\n{_format_docs(docs)}\n\n"
+        "Return ONLY this JSON, with no markdown fences:\n"
+        '{"filled": ["fact", ...], "explanations": {"fact": "brief evidence"}}'
+    )
+    parsed = _parse_json(_generate(prompt), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    claimed = parsed.get("filled", [])
+    filled = [s for s in slots if s in claimed]
+    missing = [s for s in slots if s not in filled]
+
+    if state.get("debug"):
+        explanations = parsed.get("explanations", {}) or {}
+        print(f"[reflect] round {rounds}: filled={filled} missing={missing}")
+        for slot in slots:
+            print(f"  - {slot}: {explanations.get(slot, '(no explanation)')}")
+
+    result: Dict[str, Any] = {
+        "filled": filled,
+        "need_more": bool(missing),
+        "rounds": rounds,
+    }
+    if missing:
+        # Targeted follow-ups for the next round, replacing the spent queries.
+        result["queries"] = [f"{state['topic']} {slot}" for slot in missing]
+    return result
+
+
+def route_after_reflect(state: ResearchState) -> str:
+    """Conditional edge: search again for missing facts, or synthesize."""
+    if state.get("need_more") and state.get("rounds", 0) < MAX_SEARCH_ROUNDS:
+        return "web_search"
+    return "synthesize"
+
+
+def synthesize(state: ResearchState) -> Dict[str, Any]:
+    """Write the answer, citing only documents that were actually retrieved."""
+    topic = state["topic"]
+    docs = state.get("docs", [])
+    if not docs:
         return {
-            "slots": required_slots,
-            "filled": filled_slots,
-            "need_more": len(missing) > 0,
-            "new_queries": new_queries,
-            "docs": docs,
-            "queries": queries
+            "answer": "No relevant documents found to answer the question.",
+            "citations": [],
+            "degraded": True,
         }
 
+    context = docs[:MAX_CONTEXT_DOCS]
+    prompt = (
+        f"Answer this research question: '{topic}'\n"
+        "Use only the numbered sources below. Write at most 80 words, and cite "
+        "with bracketed source numbers like [1][2].\n"
+        "Return ONLY this JSON, with no markdown fences:\n"
+        '{"answer": "...", "citations": [1, 2]}\n\n'
+        f"Sources:\n{_format_docs(context)}"
+    )
+    parsed = _parse_json(_generate(prompt), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
 
+    if not parsed.get("answer"):
+        # The model call failed or returned unusable JSON. Say so explicitly
+        # rather than emitting a plausible-looking empty answer.
+        return {
+            "answer": "Could not produce an answer from the model response.",
+            "citations": [],
+            "degraded": True,
+        }
+    answer = parsed["answer"]
 
-class Synthesize(Node):
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        topic = input_data["topic"]
-        docs = input_data.get("docs", [])
+    # Rebuild citations from our own retrieved docs so a cited URL can never be
+    # one the model invented.
+    picked: List[int] = []
+    for raw in parsed.get("citations", []) or []:
+        num = raw.get("id") if isinstance(raw, dict) else raw
+        if isinstance(num, bool) or not isinstance(num, int):
+            continue
+        if 1 <= num <= len(context) and num not in picked:
+            picked.append(num)
 
-        if not docs:
-            print("[Synthesize] No documents provided. Skipping synthesis.")
-            return {
-                "answer": "No relevant documents found to answer the question.",
-                "citations": []
-            }
-
-
-        source_text = "\n".join(f"[{i+1}] {doc['title']} {doc['url']}" for i, doc in enumerate(docs[:5]))
-
-        prompt = (
-            f"Answer this research question: '{topic}'\n"
-            f"Using only the sources below, write a concise English answer not exceeding 80 words "
-            f"(about 400 characters). End your answer with Markdown-style references like [1][2].\n\n"
-            f"Return only the raw JSON object, no markdown formatting or code blocks.\n"
-            f"Example:\n"
-            f'{{\n  "answer": "...",\n  "citations": [{{"id": 1, "title": "...", "url": "..."}}] }}\n\n'
-            f"Sources:\n{source_text}"
-        )
-
-        response = GEN_MODEL.generate_content(prompt)
-        content = response.text.strip()
-
-        # Strip code block fences if present
-        if content.startswith("```"):
-            lines = content.splitlines()
-            content = "\n".join(line for line in lines if not line.strip().startswith("```")).strip()
-
-        try:
-            parsed = json.loads(content)
-            return {
-                "answer": parsed.get("answer", ""),
-                "citations": parsed.get("citations", [])
-            }
-        except json.JSONDecodeError as e:
-            print("[Synthesize] Failed to parse JSON from LLM:", e)
-            return {
-                "answer": "Could not parse LLM response.",
-                "citations": []
-            }
-
-# === Build Pipeline ===
-def build_pipeline() -> Graph:
-    nodes = {
-        "GenerateQueries": GenerateQueries(),
-        "WebSearchTool": WebSearchTool(),
-        "Reflect": Reflect(),
-        "Synthesize": Synthesize()
-    }
-    edges = [
-        Edge("GenerateQueries", "WebSearchTool"),
-        Edge("WebSearchTool", "Reflect"),
-        Edge("Reflect", "Synthesize"),
+    citations = [
+        {"id": n, "title": context[n - 1]["title"], "url": context[n - 1]["url"]}
+        for n in picked
     ]
-    return Graph(nodes, edges, entry="GenerateQueries", exit="Synthesize", max_iter=2)
+    return {"answer": answer, "citations": citations, "degraded": False}
 
-# === CLI Entry Point ===
-def main():
-    parser = argparse.ArgumentParser()
+
+# --- Graph ----------------------------------------------------------------
+
+
+def build_pipeline():
+    """Compile the research graph."""
+    graph = StateGraph(ResearchState)
+    graph.add_node("generate_queries", generate_queries)
+    graph.add_node("web_search", web_search)
+    graph.add_node("reflect", reflect)
+    graph.add_node("synthesize", synthesize)
+
+    graph.add_edge(START, "generate_queries")
+    graph.add_edge("generate_queries", "web_search")
+    graph.add_edge("web_search", "reflect")
+    graph.add_conditional_edges(
+        "reflect",
+        route_after_reflect,
+        {"web_search": "web_search", "synthesize": "synthesize"},
+    )
+    graph.add_edge("synthesize", END)
+    return graph.compile()
+
+
+def research(topic: str, debug: bool = False) -> Dict[str, Any]:
+    """Run the pipeline and return just the answer payload."""
+    final = build_pipeline().invoke({"topic": topic, "debug": debug})
+    return {"answer": final.get("answer", ""), "citations": final.get("citations", [])}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--topic", type=str, required=False)
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("question", nargs="?", help="Research question (positional for Docker)")
+    parser.add_argument(
+        "question", nargs="?", help="Research question (positional for Docker)"
+    )
     args = parser.parse_args()
 
     topic = args.topic or args.question
     if not topic:
         parser.error("Please provide a research topic/question.")
 
-    pipeline = build_pipeline()
-    result = pipeline.run({"topic": topic, "debug": args.debug})
-
-    clean_output = {
-        "answer": result.get("answer", ""),
-        "citations": result.get("citations", [])
-    }
-    print(json.dumps(clean_output, ensure_ascii=False, indent=2))
+    print(json.dumps(research(topic, args.debug), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

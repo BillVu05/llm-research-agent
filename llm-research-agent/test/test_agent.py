@@ -1,195 +1,194 @@
-import sys
-import os
 import json
-import pytest
-from unittest.mock import patch, MagicMock
+import os
+import sys
+from unittest.mock import MagicMock, patch
 
-# Ensure src/ is in the Python path so `agent` can be imported
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from agent.cli import (
-    GenerateQueries, WebSearchTool, Reflect, Synthesize,
-    Graph, Edge
-)
+from agent import cli  # noqa: E402
+
+TOPIC = "Who won the 2022 FIFA World Cup?"
+
+PLAN = json.dumps({"queries": ["2022 World Cup winner"], "slots": ["winner", "score"]})
+ANSWER = json.dumps({"answer": "Argentina won the 2022 FIFA World Cup.", "citations": [1]})
+
+
+def result(title="Argentina wins", link="https://example.com/a", snippet="Argentina beat France."):
+    return {"title": title, "link": link, "snippet": snippet}
+
 
 @pytest.fixture
-def dummy_input():
-    return {"topic": "Who won the 2022 FIFA World Cup?"}
+def calls():
+    """Record which nodes ran, so a silently-skipped node fails the test."""
+    seen = []
+    originals = {
+        name: getattr(cli, name)
+        for name in ("generate_queries", "web_search", "reflect", "synthesize")
+    }
 
-def test_happy_path(dummy_input):
-    def gemini_side_effect(prompt):
-        if "Break the following research question" in prompt:
-            return MagicMock(text=json.dumps([
-                "2022 FIFA World Cup winner",
-                "Argentina World Cup final"
-            ]))
-        elif "Answer this research question" in prompt:
-            return MagicMock(text=json.dumps({
-                "answer": "Argentina won the 2022 FIFA World Cup.",
-                "citations": [{"id": 1, "title": "Argentina wins", "url": "https://example.com/a"}]
-            }))
-        else:
-            return MagicMock(text="{}")
+    def wrap(name, fn):
+        def inner(state):
+            seen.append(name)
+            return fn(state)
 
-    with patch("agent.cli.GEN_MODEL.generate_content", side_effect=gemini_side_effect), \
-         patch("agent.cli.GoogleSearch") as mock_serp:
+        return inner
 
-        mock_search_instance = MagicMock()
-        mock_search_instance.get_dict.return_value = {
-            "organic_results": [
-                {"title": "Argentina wins", "link": "https://example.com/a"},
-                {"title": "World Cup final", "link": "https://example.com/b"},
-            ]
+    with patch.multiple(
+        cli, **{name: wrap(name, fn) for name, fn in originals.items()}
+    ):
+        yield seen
+
+
+def run(calls, llm_replies, search_batches):
+    """Drive the compiled graph with scripted LLM and search responses."""
+    with patch.object(cli, "_generate", side_effect=llm_replies), patch.object(
+        cli, "GoogleSearch"
+    ) as search:
+        search.return_value.get_dict.side_effect = [
+            {"organic_results": batch} for batch in search_batches
+        ]
+        return cli.build_pipeline().invoke({"topic": TOPIC, "debug": False}), calls
+
+
+def test_happy_path(calls):
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    state, ran = run(calls, [PLAN, reflect_ok, ANSWER], [[result()]])
+
+    assert "Argentina" in state["answer"]
+    assert ran == ["generate_queries", "web_search", "reflect", "synthesize"]
+    assert state["citations"][0]["url"] == "https://example.com/a"
+
+
+def test_reflect_actually_runs(calls):
+    """Regression guard: reflect was previously unreachable, so the graph
+    completed without ever evaluating slot coverage."""
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    state, ran = run(calls, [PLAN, reflect_ok, ANSWER], [[result()]])
+
+    assert "reflect" in ran
+    assert state["rounds"] == 1
+    assert state["filled"] == ["winner", "score"]
+
+
+def test_two_round_supplement(calls):
+    """A coverage gap must route back to web_search and widen the doc set."""
+    gap = json.dumps({"filled": ["winner"], "explanations": {}})
+    covered = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    state, ran = run(
+        calls,
+        [PLAN, gap, covered, ANSWER],
+        [[result()], [result("Final score", "https://example.com/b", "3-3 on the day.")]],
+    )
+
+    assert ran == [
+        "generate_queries",
+        "web_search",
+        "reflect",
+        "web_search",
+        "reflect",
+        "synthesize",
+    ]
+    assert state["rounds"] == 2
+    assert len(state["docs"]) == 2
+
+
+def test_loop_is_bounded(calls):
+    """Persistent gaps must stop at MAX_SEARCH_ROUNDS, not spin."""
+    gap = json.dumps({"filled": [], "explanations": {}})
+    state, ran = run(
+        calls,
+        [PLAN, gap, gap, ANSWER],
+        [[result()], [result("Other", "https://example.com/b")]],
+    )
+
+    assert ran.count("web_search") == cli.MAX_SEARCH_ROUNDS
+    assert state["rounds"] == cli.MAX_SEARCH_ROUNDS
+    assert ran[-1] == "synthesize"
+
+
+def test_no_results(calls):
+    state, ran = run(calls, [PLAN, ANSWER], [[]])
+
+    assert state["answer"].startswith("No relevant")
+    assert state["citations"] == []
+    assert "reflect" in ran
+
+
+def test_search_error_degrades(calls):
+    """A 429 or any SerpAPI failure yields no docs, not an exception."""
+    with patch.object(cli, "_generate", side_effect=[PLAN, ANSWER]), patch.object(
+        cli, "GoogleSearch", side_effect=Exception("429 Too Many Requests")
+    ):
+        state = cli.build_pipeline().invoke({"topic": TOPIC, "debug": False})
+
+    assert state["answer"].startswith("No relevant")
+    assert state["citations"] == []
+
+
+def test_timeout_degrades(calls):
+    with patch.object(cli, "_generate", side_effect=[PLAN, ANSWER]), patch.object(
+        cli, "GoogleSearch", side_effect=TimeoutError("timed out")
+    ):
+        state = cli.build_pipeline().invoke({"topic": TOPIC, "debug": False})
+
+    assert state["answer"].startswith("No relevant")
+
+
+def test_malformed_llm_json_does_not_crash(calls):
+    # No slots could be planned, so reflect skips its LLM call entirely and
+    # only two generations happen.
+    state, ran = run(calls, ["not json at all", ANSWER], [[result()]])
+
+    # Falls back to searching the raw question.
+    assert state["queries"] == [TOPIC]
+    assert state["slots"] == []
+    assert "Argentina" in state["answer"]
+    assert ran == ["generate_queries", "web_search", "reflect", "synthesize"]
+
+
+def test_fenced_json_is_parsed(calls):
+    fenced = f"```json\n{PLAN}\n```"
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    state, _ = run(calls, [fenced, reflect_ok, ANSWER], [[result()]])
+
+    assert state["slots"] == ["winner", "score"]
+
+
+def test_invented_citations_are_dropped(calls):
+    """The model citing a source that was never retrieved must not surface."""
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    hallucinated = json.dumps({"answer": "Argentina won.", "citations": [1, 7, 99]})
+    state, _ = run(calls, [PLAN, reflect_ok, hallucinated], [[result()]])
+
+    assert [c["id"] for c in state["citations"]] == [1]
+    assert all(c["url"] == "https://example.com/a" for c in state["citations"])
+
+
+def test_snippets_reach_the_model(calls):
+    """Grounding check: retrieved snippet text must appear in the prompt."""
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    prompts = []
+
+    def record(prompt):
+        prompts.append(prompt)
+        return [PLAN, reflect_ok, ANSWER][len(prompts) - 1]
+
+    with patch.object(cli, "_generate", side_effect=record), patch.object(
+        cli, "GoogleSearch"
+    ) as search:
+        search.return_value.get_dict.return_value = {
+            "organic_results": [result(snippet="Argentina beat France on penalties.")]
         }
-        mock_serp.return_value = mock_search_instance
+        cli.build_pipeline().invoke({"topic": TOPIC, "debug": False})
 
-        graph = Graph(
-            nodes={
-                "GenerateQueries": GenerateQueries(),
-                "WebSearchTool": WebSearchTool(),
-                "Reflect": Reflect(),
-                "Synthesize": Synthesize()
-            },
-            edges=[
-                Edge("GenerateQueries", "WebSearchTool"),
-                Edge("WebSearchTool", "Reflect"),
-                Edge("Reflect", "Synthesize"),
-            ],
-            entry="GenerateQueries",
-            exit="Synthesize",
-            max_iter=2
-        )
+    assert "Argentina beat France on penalties." in prompts[-1]
 
-        result = graph.run(dummy_input)
 
-        assert "Argentina" in result["answer"]
-        assert isinstance(result["citations"], list)
-        assert result["citations"][0]["id"] == 1
+def test_urls_are_deduplicated(calls):
+    reflect_ok = json.dumps({"filled": ["winner", "score"], "explanations": {}})
+    dupes = [result(), result(title="Same page, different title")]
+    state, _ = run(calls, [PLAN, reflect_ok, ANSWER], [dupes])
 
-def test_no_results(dummy_input):
-    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["some irrelevant query"]))), \
-         patch("agent.cli.GoogleSearch") as mock_serp:
-
-        mock_search_instance = MagicMock()
-        mock_search_instance.get_dict.return_value = {"organic_results": []}
-        mock_serp.return_value = mock_search_instance
-
-        # Also patch synthesis step
-        with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
-            "answer": "No relevant documents found to answer the question.",
-            "citations": []
-        }))):
-            graph = Graph(
-                nodes={
-                    "GenerateQueries": GenerateQueries(),
-                    "WebSearchTool": WebSearchTool(),
-                    "Reflect": Reflect(),
-                    "Synthesize": Synthesize()
-                },
-                edges=[
-                    Edge("GenerateQueries", "WebSearchTool"),
-                    Edge("WebSearchTool", "Reflect"),
-                    Edge("Reflect", "Synthesize"),
-                ],
-                entry="GenerateQueries",
-                exit="Synthesize",
-                max_iter=2
-            )
-
-            result = graph.run(dummy_input)
-            assert result["answer"].startswith("No relevant")
-            assert result["citations"] == []
-
-def test_http_429(dummy_input):
-    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["rate limited search"]))), \
-         patch("agent.cli.GoogleSearch", side_effect=Exception("429 Too Many Requests")), \
-         patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
-             "answer": "No relevant documents found to answer the question.",
-             "citations": []
-         }))):
-
-        graph = Graph(
-            nodes={
-                "GenerateQueries": GenerateQueries(),
-                "WebSearchTool": WebSearchTool(),
-                "Reflect": Reflect(),
-                "Synthesize": Synthesize()
-            },
-            edges=[
-                Edge("GenerateQueries", "WebSearchTool"),
-                Edge("WebSearchTool", "Reflect"),
-                Edge("Reflect", "Synthesize"),
-            ],
-            entry="GenerateQueries",
-            exit="Synthesize",
-            max_iter=2
-        )
-
-        result = graph.run(dummy_input)
-        assert result["citations"] == []
-
-def test_timeout(dummy_input):
-    with patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps(["timeout query"]))), \
-         patch("agent.cli.GoogleSearch", side_effect=TimeoutError("Timeout")), \
-         patch("agent.cli.GEN_MODEL.generate_content", return_value=MagicMock(text=json.dumps({
-             "answer": "No relevant documents found to answer the question.",
-             "citations": []
-         }))):
-
-        graph = Graph(
-            nodes={
-                "GenerateQueries": GenerateQueries(),
-                "WebSearchTool": WebSearchTool(),
-                "Reflect": Reflect(),
-                "Synthesize": Synthesize()
-            },
-            edges=[
-                Edge("GenerateQueries", "WebSearchTool"),
-                Edge("WebSearchTool", "Reflect"),
-                Edge("Reflect", "Synthesize"),
-            ],
-            entry="GenerateQueries",
-            exit="Synthesize",
-            max_iter=2
-        )
-
-        result = graph.run(dummy_input)
-        assert result["answer"].startswith("No relevant")
-
-def test_two_round_supplement(dummy_input):
-    def gemini_side_effect(prompt):
-        if "Break the following research question" in prompt:
-            return MagicMock(text=json.dumps(["first query"]))
-        elif "Answer this research question" in prompt:
-            return MagicMock(text=json.dumps({
-                "answer": "No relevant documents found to answer the question.",
-                "citations": []
-            }))
-        return MagicMock(text="{}")
-
-    with patch("agent.cli.GEN_MODEL.generate_content", side_effect=gemini_side_effect), \
-         patch("agent.cli.GoogleSearch") as mock_serp:
-
-        mock_search_instance = MagicMock()
-        mock_search_instance.get_dict.return_value = {"organic_results": []}
-        mock_serp.return_value = mock_search_instance
-
-        graph = Graph(
-            nodes={
-                "GenerateQueries": GenerateQueries(),
-                "WebSearchTool": WebSearchTool(),
-                "Reflect": Reflect(),
-                "Synthesize": Synthesize()
-            },
-            edges=[
-                Edge("GenerateQueries", "WebSearchTool"),
-                Edge("WebSearchTool", "Reflect"),
-                Edge("Reflect", "Synthesize"),
-            ],
-            entry="GenerateQueries",
-            exit="Synthesize",
-            max_iter=2
-        )
-
-        result = graph.run(dummy_input)
-        assert result["answer"].startswith("No relevant")
+    assert len(state["docs"]) == 1
