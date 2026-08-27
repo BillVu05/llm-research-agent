@@ -101,16 +101,26 @@ All tests are run via `pytest`.
 
 ### Dockerized Build:
 
+The build context is the repo root, so the image can install from the single
+top-level `requirements.txt`.
+
 ```bash
-docker build -t llm-research-agent .
-docker run --rm -it --env-file .env llm-research-agent "<your question>"
+cd llm-research-agent
+docker compose run --rm agent "<your question>"
+```
+
+Or without Compose, from the repo root:
+
+```bash
+docker build -f llm-research-agent/Dockerfile -t llm-research-agent .
+docker run --rm --env-file .env llm-research-agent "<your question>"
 ```
 
 ### Local Usage:
 
 ```bash
 pip install -r requirements.txt
-python -m agent.cli --topic "<your question>"
+python llm-research-agent/src/agent/cli.py --topic "<your question>"
 ```
 
 ---
