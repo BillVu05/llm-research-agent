@@ -1,0 +1,5 @@
+# Test and lint tooling. Kept out of requirements.txt so it does not ship in
+# the Docker image.
+-r requirements.txt
+pytest>=8.0.0,<9
+ruff>=0.16,<1

@@ -20,9 +20,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: |
-          pip install -r requirements.txt
-          pip install ruff
+        run: pip install -r requirements-dev.txt
 
       - name: Lint
         run: ruff check .
@@ -37,4 +35,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker build -f llm-research-agent/Dockerfile -t llm-research-agent .
+        run: docker build -t llm-research-agent .

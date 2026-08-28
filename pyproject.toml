@@ -1,6 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-research-agent"
+version = "0.1.0"
+description = "CLI research agent: question -> planned search -> coverage reflection -> cited JSON answer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "google-generativeai>=0.5.0,<0.9",
+    "python-dotenv>=1.0.1,<2",
+    "google-search-results>=2.4.2,<3",
+    "langgraph>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0,<9", "ruff>=0.16,<1"]
+
+[project.scripts]
+# Saves typing `python src/agent/cli.py` every time.
+research-agent = "agent.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["agent"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Where first-party code lives, so import sorting groups `agent` and
+# `run_eval` correctly rather than treating them as third-party.
+src = ["src", "eval"]
 
 [tool.ruff.lint]
 # E/F: pyflakes + pycodestyle. I: import order. UP: modern syntax.
@@ -8,5 +40,5 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "RUF"]
 
 [tool.pytest.ini_options]
-testpaths = ["llm-research-agent/test"]
+testpaths = ["tests"]
 addopts = "-q"

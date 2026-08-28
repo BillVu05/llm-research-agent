@@ -1,25 +1,25 @@
 {"id": "wc2022-winner", "tier": "parametric", "question": "Who won the 2022 FIFA World Cup?", "must_include": ["argentina"]}
-{"id": "wc2022-final-score", "tier": "retrieval", "question": "What was the score in the 2022 FIFA World Cup final, including the penalty shootout?", "must_include": ["3", "4", "2"]}
+{"id": "wc2022-final-score", "tier": "retrieval", "question": "What was the score in the 2022 FIFA World Cup final, including the penalty shootout?", "must_include": ["3-3", "4-2"]}
 {"id": "au-capital", "tier": "parametric", "question": "What is the capital city of Australia?", "must_include": ["canberra"]}
 {"id": "1984-author", "tier": "parametric", "question": "Who wrote the novel Nineteen Eighty-Four?", "must_include": ["orwell"]}
 {"id": "chernobyl-year", "tier": "parametric", "question": "In what year did the Chernobyl nuclear disaster occur?", "must_include": ["1986"]}
 {"id": "element-79", "tier": "parametric", "question": "Which chemical element has the atomic number 79?", "must_include": ["gold"]}
-{"id": "moon-first", "tier": "parametric", "question": "Who was the first person to walk on the Moon?", "must_include": ["armstrong"]}
-{"id": "tallest-mountain", "tier": "parametric", "question": "What is the tallest mountain above sea level?", "must_include": ["everest"]}
 {"id": "python-creator", "tier": "parametric", "question": "Who created the Python programming language?", "must_include": ["rossum"]}
-{"id": "largest-planet", "tier": "parametric", "question": "What is the largest planet in the Solar System?", "must_include": ["jupiter"]}
 {"id": "berlin-wall", "tier": "parametric", "question": "In what year did the Berlin Wall fall?", "must_include": ["1989"]}
-{"id": "mona-lisa", "tier": "parametric", "question": "Who painted the Mona Lisa?", "must_include": ["leonardo"]}
-{"id": "table-salt", "tier": "parametric", "question": "What is the chemical formula for table salt?", "must_include": ["nacl"]}
 {"id": "olympics-2016", "tier": "parametric", "question": "Which country hosted the 2016 Summer Olympics?", "must_include": ["brazil"]}
 {"id": "relativity", "tier": "parametric", "question": "Who developed the theory of general relativity?", "must_include": ["einstein"]}
 {"id": "github-acquisition", "tier": "retrieval", "question": "Which company acquired GitHub, and in what year was the acquisition completed?", "must_include": ["microsoft", "2018"]}
-{"id": "tokyo-2020-au-gold", "tier": "retrieval", "question": "How many gold medals did Australia win at the Tokyo 2020 Olympic Games?", "must_include": ["17"]}
+{"id": "tokyo-2020-au-gold", "tier": "retrieval", "question": "How many gold medals did Australia win at the Tokyo 2020 Olympic Games?", "must_include": ["17 gold"]}
 {"id": "iphone-launch", "tier": "retrieval", "question": "In what year was the first iPhone released, and who announced it?", "must_include": ["2007", "jobs"]}
-{"id": "hobbit-author", "tier": "parametric", "question": "Who is the author of The Hobbit?", "must_include": ["tolkien"]}
 {"id": "webb-launch", "tier": "retrieval", "question": "On what date was the James Webb Space Telescope launched, and on which rocket?", "must_include": ["2021", "ariane"]}
 {"id": "cwc2019-final", "tier": "multi_fact", "question": "Who won the 2019 Cricket World Cup final, how was the tie resolved, and at which ground was it played?", "must_include": ["england", "boundary", "lord"]}
-{"id": "wc2026-hosts", "tier": "multi_fact", "question": "Which three countries are co-hosting the 2026 FIFA World Cup, and how many teams will compete?", "must_include": ["united states", "canada", "mexico", "48"]}
+{"id": "wc2026-hosts", "tier": "multi_fact", "question": "Which three countries are co-hosting the 2026 FIFA World Cup, and how many teams will compete?", "must_include": ["united states", "canada", "mexico", "48 teams"]}
 {"id": "opera-house", "tier": "multi_fact", "question": "In what year was the Sydney Opera House opened, who was its architect, and who formally opened it?", "must_include": ["1973", "utzon", "elizabeth"]}
 {"id": "kosciuszko", "tier": "multi_fact", "question": "How tall is Mount Kosciuszko, in which Australian state is it, and what is its national park called?", "must_include": ["2228", "new south wales", "kosciuszko"]}
 {"id": "apollo11-crew", "tier": "multi_fact", "question": "Name the three Apollo 11 crew members, the date of the Moon landing, and the name of the lunar module.", "must_include": ["armstrong", "aldrin", "collins", "1969", "eagle"]}
+{"id": "false-premise-wc2027", "tier": "abstention", "question": "Who won the 2027 FIFA World Cup?", "must_include": [], "must_not_include": ["argentina", "france", "brazil", "won the"], "note": "Tournament has not happened. A confident winner is a hallucination."}
+{"id": "unknowable-private", "tier": "abstention", "question": "What did the CEO of SerpAPI eat for breakfast on 3 March 2019?", "must_include": [], "must_not_include": ["cereal", "toast", "eggs", "coffee"], "note": "Unknowable from the public web; the agent should decline."}
+{"id": "nobel-2023-physics", "tier": "multi_fact", "question": "Who shared the 2023 Nobel Prize in Physics, and what was it awarded for?", "must_include": ["agostini", "krausz", "l'huillier", "attosecond"]}
+{"id": "artemis1-duration", "tier": "retrieval", "question": "On what date did Artemis 1 launch and how many days did the mission last?", "must_include": ["2022", "25 days"]}
+{"id": "gpt4-release", "tier": "retrieval", "question": "In what month and year was GPT-4 released, and by which company?", "must_include": ["march", "2023", "openai"]}
+{"id": "everest-height-dispute", "tier": "multi_fact", "question": "What is the officially agreed height of Mount Everest as of 2020, which two countries jointly announced it, and how did it change?", "must_include": ["8848.86", "nepal", "china"]}

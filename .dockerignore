@@ -1,8 +1,18 @@
-.venv/
 .git/
+.github/
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+
+# Secrets and personal files never belong in an image layer.
 .env
 cv.md
+
+# Not needed at runtime.
 docs/
+tests/
+eval/
+conftest.py
+requirements-dev.txt

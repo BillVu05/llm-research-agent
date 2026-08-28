@@ -35,7 +35,12 @@ def load_golden(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def score_case(case: dict[str, Any], state: dict[str, Any], elapsed: float) -> dict[str, Any]:
+def score_case(
+    case: dict[str, Any],
+    state: dict[str, Any],
+    elapsed: float,
+    llm_calls: int | None = None,
+) -> dict[str, Any]:
     """Deterministic scoring of one run. Pure function - unit tested offline."""
     answer = state.get("answer") or ""
     citations = state.get("citations") or []
@@ -56,6 +61,13 @@ def score_case(case: dict[str, Any], state: dict[str, Any], elapsed: float) -> d
     haystack = answer.lower()
     hits = [k for k in wanted if k.lower() in haystack]
 
+    # An abstention case has no right answer: the agent is being graded on NOT
+    # inventing one. A hallucinated fact here is worse than a missing one, so
+    # this is scored as a hard pass/fail rather than folded into recall.
+    banned = case.get("must_not_include", [])
+    hallucinated = [k for k in banned if k.lower() in haystack]
+    abstained = None if not banned else not hallucinated
+
     # Every cited URL must be one we actually retrieved. This is guaranteed by
     # construction in synthesize(); the metric exists to catch a regression.
     grounded_citations = all(c.get("url") in doc_urls for c in citations)
@@ -73,6 +85,8 @@ def score_case(case: dict[str, Any], state: dict[str, Any], elapsed: float) -> d
         "schema_ok": schema_ok,
         "keyword_recall": round(len(hits) / len(wanted), 3) if wanted else None,
         "missing_keywords": [k for k in wanted if k not in hits],
+        "abstained": abstained,
+        "hallucinated_terms": hallucinated,
         "n_citations": len(citations),
         "has_citations": bool(citations),
         "citations_all_retrieved": grounded_citations,
@@ -83,6 +97,8 @@ def score_case(case: dict[str, Any], state: dict[str, Any], elapsed: float) -> d
         "words": words,
         "within_word_budget": words <= WORD_BUDGET,
         "latency_s": round(elapsed, 2),
+        # Latency says how long a question took; this says what it cost.
+        "llm_calls": llm_calls,
     }
 
 
@@ -122,6 +138,22 @@ def _mean(values: list[Any]) -> Any:
     return round(statistics.mean(nums), 3) if nums else None
 
 
+def _rate(values: list[Any]) -> Any:
+    """Pass rate over the cases the metric applies to, ignoring None."""
+    flags = [v for v in values if v is not None]
+    return round(sum(flags) / len(flags), 3) if flags else None
+
+
+def _p95(values: list[float]) -> Any:
+    """The old formula was sorted[int(0.95 * n) - 1], which lands on p92 at
+    n=25. quantiles interpolates and is stdlib."""
+    if not values:
+        return None
+    if len(values) < 2:
+        return round(values[0], 2)
+    return round(statistics.quantiles(values, n=20, method="inclusive")[-1], 2)
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(rows)
     if not n:
@@ -141,10 +173,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_docs": _mean([r["n_docs"] for r in rows]),
         "second_round_rate": round(sum(r["search_rounds"] > 1 for r in rows) / n, 3),
         "mean_groundedness": _mean([r.get("groundedness") for r in rows]),
+        # Abstention cases only. None when the run contained none of them.
+        "abstention_rate": _rate([r["abstained"] for r in rows]),
+        "mean_llm_calls": _mean([r["llm_calls"] for r in rows]),
         "mean_latency_s": _mean([r["latency_s"] for r in rows]),
-        "p95_latency_s": round(
-            sorted(r["latency_s"] for r in rows)[max(0, int(0.95 * n) - 1)], 2
-        ),
+        "p95_latency_s": _p95([r["latency_s"] for r in rows]),
     }
 
 
@@ -156,9 +189,14 @@ def render(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
     for r in rows:
         kw = "-" if r["keyword_recall"] is None else f"{r['keyword_recall']:.2f}"
         sl = "-" if r["slot_fill_rate"] is None else f"{r['slot_fill_rate']:.2f}"
+        # An abstention case passes by declining, so a fabricated answer fails
+        # it however well-formed and well-cited that answer is.
         ok = (
             "PASS"
-            if r["answered"] and r["schema_ok"] and r["citations_all_retrieved"]
+            if r["answered"]
+            and r["schema_ok"]
+            and r["citations_all_retrieved"]
+            and r["abstained"] is not False
             else "FAIL"
         )
         out.append(
@@ -198,12 +236,15 @@ def main() -> None:
         if args.sleep and i > 1:
             time.sleep(args.sleep)
         start = time.perf_counter()
+        calls_before = cli.LLM_CALLS
         try:
             state = pipeline.invoke({"topic": case["question"], "debug": False})
         except Exception as exc:  # a crashed case is a data point, not a stop
             print(f"    ERROR: {exc}", file=sys.stderr)
             state = {"answer": "", "citations": [], "docs": []}
-        row = score_case(case, state, time.perf_counter() - start)
+        row = score_case(
+            case, state, time.perf_counter() - start, cli.LLM_CALLS - calls_before
+        )
         if args.judge:
             row.update(judge_groundedness(case, state))
         rows.append(row)

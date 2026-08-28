@@ -1,12 +1,8 @@
 import json
-import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../eval")))
 
 import run_eval
 
@@ -33,11 +29,24 @@ def test_golden_set_is_well_formed():
     assert len({c["id"] for c in cases}) == 25, "duplicate case ids"
     for c in cases:
         assert c["question"].strip()
-        assert c["must_include"], f"{c['id']} has no checkable keywords"
-        assert c["tier"] in {"parametric", "retrieval", "multi_fact"}
-    # multi_fact cases exist to exercise the reflect -> web_search loop, which
-    # the easier tiers never trigger.
+        assert c["tier"] in {"parametric", "retrieval", "multi_fact", "abstention"}
+        # Abstention cases are graded on what must NOT appear, everything else
+        # on what must.
+        checkable = c.get("must_include") or c.get("must_not_include")
+        assert checkable, f"{c['id']} has no checkable keywords"
+        if c["tier"] == "abstention":
+            assert c["must_not_include"], f"{c['id']} must ban some fabricated answer"
+        # A bare digit like "2" matches "2022" in almost any answer, so a
+        # keyword that short proves nothing.
+        for kw in c.get("must_include", []):
+            assert len(kw) >= 3, f"{c['id']}: keyword {kw!r} is too short to be evidence"
+    # multi_fact cases exercise the reflect -> web_search loop, which the easier
+    # tiers never trigger; abstention cases catch confident hallucination.
     assert sum(c["tier"] == "multi_fact" for c in cases) >= 5
+    assert sum(c["tier"] == "abstention" for c in cases) >= 2
+    # Parametric questions measure the model's recall, not the agent's
+    # retrieval, so they must not dominate the headline numbers.
+    assert sum(c["tier"] == "parametric" for c in cases) <= len(cases) // 2
 
 
 def test_load_golden_tolerates_bom(tmp_path):
@@ -146,3 +155,63 @@ def test_render_runs():
     rows = [run_eval.score_case(CASE, STATE, 1.0)]
     text = run_eval.render(rows, run_eval.summarize(rows))
     assert "wc" in text and "SUMMARY" in text
+
+
+# --- abstention, cost and percentile scoring ------------------------------
+
+ABSTAIN_CASE = {
+    "id": "wc2027",
+    "tier": "abstention",
+    "question": "Who won the 2027 FIFA World Cup?",
+    "must_include": [],
+    "must_not_include": ["argentina", "france"],
+}
+
+
+def test_abstention_case_passes_when_the_agent_declines():
+    state = dict(STATE, answer="The 2027 tournament has not been played yet.")
+    row = run_eval.score_case(ABSTAIN_CASE, state, 0.1)
+    assert row["abstained"] is True
+    assert row["hallucinated_terms"] == []
+    assert "PASS" in run_eval.render([row], run_eval.summarize([row]))
+
+
+def test_abstention_case_fails_on_a_confident_fabrication():
+    """A well-formed, well-cited answer to an unanswerable question is the
+    worst output this agent can produce, so it must not score PASS."""
+    state = dict(STATE, answer="Argentina won the 2027 FIFA World Cup.")
+    row = run_eval.score_case(ABSTAIN_CASE, state, 0.1)
+    assert row["abstained"] is False
+    assert row["hallucinated_terms"] == ["argentina"]
+    assert row["schema_ok"] and row["citations_all_retrieved"] and row["answered"]
+    assert "FAIL" in run_eval.render([row], run_eval.summarize([row]))
+    assert run_eval.summarize([row])["abstention_rate"] == 0.0
+
+
+def test_abstention_rate_ignores_non_abstention_cases():
+    rows = [
+        run_eval.score_case(CASE, STATE, 1.0),
+        run_eval.score_case(ABSTAIN_CASE, dict(STATE, answer="Not yet played."), 1.0),
+    ]
+    # Only the one case the metric applies to counts, not 0.5 across both.
+    assert run_eval.summarize(rows)["abstention_rate"] == 1.0
+    assert run_eval.score_case(CASE, STATE, 1.0)["abstained"] is None
+
+
+def test_llm_calls_are_recorded():
+    row = run_eval.score_case(CASE, STATE, 1.0, llm_calls=4)
+    assert row["llm_calls"] == 4
+    assert run_eval.summarize([row])["mean_llm_calls"] == 4
+
+
+def test_p95_uses_the_upper_tail():
+    """The old index formula returned p92 at n=25, understating the tail."""
+    latencies = list(range(1, 26))
+    rows = [run_eval.score_case(CASE, STATE, float(x)) for x in latencies]
+    p95 = run_eval.summarize(rows)["p95_latency_s"]
+    assert p95 > 23.0, f"p95 {p95} is below the 24th of 25 samples"
+
+
+def test_p95_handles_a_single_case():
+    rows = [run_eval.score_case(CASE, STATE, 2.0)]
+    assert run_eval.summarize(rows)["p95_latency_s"] == 2.0

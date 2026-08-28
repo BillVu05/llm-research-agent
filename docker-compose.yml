@@ -1,0 +1,10 @@
+services:
+  agent:
+    build:
+      context: .
+    image: llm-research-agent:latest
+    # Reads GEMINI_API_KEY / SERPAPI_API_KEY from the .env beside this file
+    # (gitignored). See .env.example for the expected keys.
+    env_file:
+      - .env
+    command: []
