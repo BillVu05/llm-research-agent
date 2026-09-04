@@ -21,6 +21,7 @@ __pycache__/
 # eval/baseline.json, which is deliberately not ignored:
 # a baseline nobody can diff against is not a baseline.
 eval-*.json
+eval-*.log
 !eval/baseline.json
 
 # OS / editor

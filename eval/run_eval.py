@@ -22,7 +22,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent import cli
+from agent import graph, llm, prompts
 
 WORD_BUDGET = 100
 GOLDEN = Path(__file__).with_name("golden.jsonl")
@@ -45,10 +45,12 @@ def score_case(
     answer = state.get("answer") or ""
     citations = state.get("citations") or []
     docs = state.get("docs") or []
+    chunks = state.get("chunks") or []
+    context = state.get("context") or []
     slots = state.get("slots") or []
     filled = state.get("filled") or []
 
-    doc_urls = {d.get("url") for d in docs}
+    doc_urls = {c.get("url") for c in context} | {d.get("url") for d in docs}
     schema_ok = (
         isinstance(answer, str)
         and isinstance(citations, list)
@@ -72,6 +74,22 @@ def score_case(
     # construction in synthesize(); the metric exists to catch a regression.
     grounded_citations = all(c.get("url") in doc_urls for c in citations)
 
+    # Did retrieval find the fact, or did generation drop it? Without this
+    # split, a missed keyword is unattributable: you cannot tell a search that
+    # returned nothing useful from a model that was handed the fact and ignored
+    # it. keyword_recall is the answer; context_recall is the context.
+    context_text = " ".join(c.get("text", "") for c in context).lower()
+    context_hits = [k for k in wanted if k.lower() in context_text]
+
+    # Sources that were put in the window but never cited. High context, low
+    # utilization means the window is being padded.
+    cited_urls = {c.get("url") for c in citations}
+    utilization = (
+        round(len({c["url"] for c in context} & cited_urls) / len(context), 3)
+        if context
+        else None
+    )
+
     words = len(answer.split())
     # A degraded run (no documents, or a failed/throttled model call) is NOT a
     # pass, however schema-valid its empty output happens to be.
@@ -84,13 +102,25 @@ def score_case(
         "answered": answered,
         "schema_ok": schema_ok,
         "keyword_recall": round(len(hits) / len(wanted), 3) if wanted else None,
+        "context_recall": round(len(context_hits) / len(wanted), 3) if wanted else None,
         "missing_keywords": [k for k in wanted if k not in hits],
+        # A keyword the context had and the answer lost. This is the actionable
+        # list: it is a generation problem, and no amount of better search fixes it.
+        "dropped_by_generation": [k for k in context_hits if k not in hits],
         "abstained": abstained,
         "hallucinated_terms": hallucinated,
         "n_citations": len(citations),
         "has_citations": bool(citations),
         "citations_all_retrieved": grounded_citations,
         "n_docs": len(docs),
+        "n_chunks": len(chunks),
+        "n_context_sources": len(context),
+        "chunk_utilization": utilization,
+        "page_chunk_rate": (
+            round(sum(c.get("source") == "page" for c in chunks) / len(chunks), 3)
+            if chunks
+            else None
+        ),
         "slots": slots,
         "slot_fill_rate": round(len(filled) / len(slots), 3) if slots else None,
         "search_rounds": state.get("rounds", 0),
@@ -114,16 +144,16 @@ JUDGE_PROMPT = (
 
 def judge_groundedness(case: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """LLM-as-judge groundedness. Opt-in: it costs a call per case."""
-    docs = state.get("docs") or []
-    if not docs or not state.get("answer"):
+    context = state.get("context") or []
+    if not context or not state.get("answer"):
         return {"groundedness": None, "reason": "no documents or no answer"}
 
     prompt = JUDGE_PROMPT.format(
         question=case["question"],
         answer=state.get("answer", ""),
-        sources=cli._format_docs(docs),
+        sources=prompts.format_docs(context),
     )
-    parsed = cli._parse_json(cli._generate(prompt), {})
+    parsed = llm.parse_json(llm.generate(prompt), {})
     if not isinstance(parsed, dict):
         return {"groundedness": None, "reason": "unparseable judge output"}
     score = parsed.get("groundedness")
@@ -167,10 +197,16 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             sum(r["citations_all_retrieved"] for r in rows) / n, 3
         ),
         "mean_keyword_recall": _mean([r["keyword_recall"] for r in rows]),
+        "mean_context_recall": _mean([r["context_recall"] for r in rows]),
         "mean_slot_fill_rate": _mean([r["slot_fill_rate"] for r in rows]),
         "word_budget_rate": round(sum(r["within_word_budget"] for r in rows) / n, 3),
         "mean_citations": _mean([r["n_citations"] for r in rows]),
         "mean_docs": _mean([r["n_docs"] for r in rows]),
+        "mean_chunks": _mean([r["n_chunks"] for r in rows]),
+        "mean_chunk_utilization": _mean([r["chunk_utilization"] for r in rows]),
+        # Share of chunks that came from a fetched page rather than a snippet
+        # fallback. A collapse here explains a quality drop that looks mysterious.
+        "page_chunk_rate": _mean([r["page_chunk_rate"] for r in rows]),
         "second_round_rate": round(sum(r["search_rounds"] > 1 for r in rows) / n, 3),
         "mean_groundedness": _mean([r.get("groundedness") for r in rows]),
         # Abstention cases only. None when the run contained none of them.
@@ -183,11 +219,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def render(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
     out = [
-        f"{'id':<22} {'tier':<11} {'kw':>5} {'slots':>6} {'cite':>5} {'rnd':>4} {'sec':>6}  ok",
-        "-" * 78,
+        f"{'id':<22} {'tier':<11} {'kw':>5} {'ctx':>5} {'slots':>6} "
+        f"{'cite':>5} {'rnd':>4} {'sec':>6}  ok",
+        "-" * 84,
     ]
     for r in rows:
         kw = "-" if r["keyword_recall"] is None else f"{r['keyword_recall']:.2f}"
+        ctx = "-" if r["context_recall"] is None else f"{r['context_recall']:.2f}"
         sl = "-" if r["slot_fill_rate"] is None else f"{r['slot_fill_rate']:.2f}"
         # An abstention case passes by declining, so a fabricated answer fails
         # it however well-formed and well-cited that answer is.
@@ -200,7 +238,7 @@ def render(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
             else "FAIL"
         )
         out.append(
-            f"{r['id']:<22} {r['tier']:<11} {kw:>5} {sl:>6} "
+            f"{r['id']:<22} {r['tier']:<11} {kw:>5} {ctx:>5} {sl:>6} "
             f"{r['n_citations']:>5} {r['search_rounds']:>4} {r['latency_s']:>6.2f}  {ok}"
         )
     out.append("")
@@ -229,21 +267,21 @@ def main() -> None:
     if args.limit:
         cases = cases[: args.limit]
 
-    pipeline = cli.build_pipeline()
+    pipeline = graph.build_pipeline()
     rows = []
     for i, case in enumerate(cases, 1):
         print(f"[{i}/{len(cases)}] {case['id']}", file=sys.stderr)
         if args.sleep and i > 1:
             time.sleep(args.sleep)
         start = time.perf_counter()
-        calls_before = cli.LLM_CALLS
+        calls_before = llm.LLM_CALLS
         try:
             state = pipeline.invoke({"topic": case["question"], "debug": False})
         except Exception as exc:  # a crashed case is a data point, not a stop
             print(f"    ERROR: {exc}", file=sys.stderr)
-            state = {"answer": "", "citations": [], "docs": []}
+            state = {"answer": "", "citations": [], "docs": [], "context": []}
         row = score_case(
-            case, state, time.perf_counter() - start, cli.LLM_CALLS - calls_before
+            case, state, time.perf_counter() - start, llm.LLM_CALLS - calls_before
         )
         if args.judge:
             row.update(judge_groundedness(case, state))

@@ -12,4 +12,6 @@ COPY src ./src
 RUN useradd --create-home --uid 10001 agent && chown -R agent:agent /app
 USER agent
 
-ENTRYPOINT ["python", "src/agent/cli.py"]
+# A module inside a package cannot be run by path; relative imports break.
+ENV PYTHONPATH=/app/src
+ENTRYPOINT ["python", "-m", "agent.cli"]

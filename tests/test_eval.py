@@ -17,6 +17,9 @@ STATE = {
     "answer": "Argentina won on penalties.",
     "citations": [{"id": 1, "title": "T", "url": "https://a.com"}],
     "docs": [{"title": "T", "url": "https://a.com", "snippet": "s"}],
+    "chunks": [{"title": "T", "url": "https://a.com", "text": "Argentina, on penalties.",
+                "source": "page"}],
+    "context": [{"title": "T", "url": "https://a.com", "text": "Argentina, on penalties."}],
     "slots": ["winner", "score"],
     "filled": ["winner"],
     "rounds": 2,
@@ -140,13 +143,13 @@ def test_summarize_empty():
 
 def test_judge_groundedness_parses_score():
     reply = json.dumps({"groundedness": 1.0, "reason": "supported"})
-    with patch.object(run_eval.cli, "_generate", return_value=reply):
+    with patch.object(run_eval.llm, "generate", return_value=reply):
         out = run_eval.judge_groundedness(CASE, STATE)
     assert out["groundedness"] == 1.0
 
 
 def test_judge_groundedness_survives_garbage():
-    with patch.object(run_eval.cli, "_generate", return_value="not json"):
+    with patch.object(run_eval.llm, "generate", return_value="not json"):
         out = run_eval.judge_groundedness(CASE, STATE)
     assert out["groundedness"] is None
 
@@ -215,3 +218,55 @@ def test_p95_uses_the_upper_tail():
 def test_p95_handles_a_single_case():
     rows = [run_eval.score_case(CASE, STATE, 2.0)]
     assert run_eval.summarize(rows)["p95_latency_s"] == 2.0
+
+
+# --- retrieval vs generation ----------------------------------------------
+
+
+def test_context_recall_separates_retrieval_from_generation():
+    """The metric that makes a miss actionable: the context had the fact and
+    the answer dropped it, so this is a generation bug, not a search one."""
+    state = dict(STATE, answer="Argentina won the match.")
+    row = run_eval.score_case(CASE, state, 0.1)
+
+    assert row["context_recall"] == 1.0
+    assert row["keyword_recall"] == 0.5
+    assert row["dropped_by_generation"] == ["penalties"]
+
+
+def test_context_recall_is_zero_when_retrieval_missed_it():
+    state = dict(
+        STATE,
+        answer="I could not determine the result.",
+        context=[{"title": "T", "url": "https://a.com", "text": "unrelated gardening text"}],
+    )
+    row = run_eval.score_case(CASE, state, 0.1)
+
+    assert row["context_recall"] == 0.0
+    assert row["dropped_by_generation"] == [], "nothing was dropped; it was never retrieved"
+
+
+def test_chunk_utilization_counts_cited_sources():
+    state = dict(
+        STATE,
+        context=STATE["context"] + [{"title": "B", "url": "https://b.com", "text": "x"}],
+    )
+    row = run_eval.score_case(CASE, state, 0.1)
+
+    assert row["chunk_utilization"] == 0.5
+
+
+def test_page_chunk_rate_tracks_snippet_fallback():
+    state = dict(
+        STATE,
+        chunks=[
+            {"url": "https://a.com", "text": "x", "source": "page"},
+            {"url": "https://b.com", "text": "y", "source": "snippet"},
+        ],
+    )
+    assert run_eval.score_case(CASE, state, 0.1)["page_chunk_rate"] == 0.5
+
+
+def test_citations_are_validated_against_the_retrieved_context():
+    state = dict(STATE, citations=[{"id": 1, "title": "X", "url": "https://invented.com"}])
+    assert run_eval.score_case(CASE, state, 0.1)["citations_all_retrieved"] is False
